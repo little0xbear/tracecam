@@ -17,7 +17,8 @@ const state = {
     projectName: '',
     operatorName: ''
   },
-  currentPreview: null
+  currentPreview: null,
+  detailsExpanded: false
 };
 
 // Storage keys
@@ -41,6 +42,20 @@ document.addEventListener('DOMContentLoaded', () => {
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
+  
+  // Keyboard shortcuts
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      closeLogs();
+      closeGallery();
+      closeSettings();
+      closePreview();
+    }
+    if (e.key === ' ' && !e.target.matches('input, textarea')) {
+      e.preventDefault();
+      capturePhoto();
+    }
+  });
 });
 
 // Generate session ID
@@ -48,6 +63,17 @@ function generateSessionId() {
   const timestamp = Date.now().toString(36).toUpperCase();
   const random = Math.random().toString(36).substring(2, 6).toUpperCase();
   return `TC-${timestamp}-${random}`;
+}
+
+// Update status display
+function updateStatus(text, type = 'loading') {
+  const statusText = document.getElementById('statusText');
+  const statusDot = document.getElementById('statusDot');
+  
+  statusText.textContent = text;
+  statusDot.className = 'w-1.5 h-1.5 rounded-full status-dot ' + 
+    (type === 'ready' ? 'bg-green-500' : 
+     type === 'error' ? 'bg-red-500' : 'bg-yellow-500');
 }
 
 // Update live time display
@@ -65,13 +91,15 @@ function updateLiveTime() {
     hour12: false
   });
   
-  document.getElementById('liveTimeUTC').textContent = 'UTC: ' + now.toISOString().replace('T', ' ').substring(0, 19);
+  document.getElementById('liveTimeUTC').textContent = 'UTC ' + now.toISOString().replace('T', ' ').substring(0, 19);
   document.getElementById('timezoneBadge').textContent = timezone.split('/').pop().replace('_', ' ');
 }
 
 // Initialize camera
 async function initCamera() {
   try {
+    updateStatus('Starting camera...', 'loading');
+    
     const constraints = {
       video: {
         facingMode: state.facingMode,
@@ -86,14 +114,27 @@ async function initCamera() {
     }
     
     state.stream = await navigator.mediaDevices.getUserMedia(constraints);
-    document.getElementById('videoElement').srcObject = state.stream;
+    const video = document.getElementById('videoElement');
+    video.srcObject = state.stream;
     
-    document.getElementById('statusText').textContent = 'Camera ready';
-    showToast('Camera initialized', 'success');
+    video.onloadedmetadata = () => {
+      document.getElementById('noCameraFallback').classList.add('hidden');
+      updateStatus('Camera ready', 'ready');
+      showToast('Camera initialized', 'success');
+    };
+    
   } catch (error) {
     console.error('Camera error:', error);
-    document.getElementById('statusText').textContent = 'Camera error';
-    showToast('Camera access denied', 'error');
+    updateStatus('Camera unavailable', 'error');
+    document.getElementById('noCameraFallback').classList.remove('hidden');
+    
+    if (error.name === 'NotAllowedError') {
+      showToast('Camera permission denied', 'error');
+    } else if (error.name === 'NotFoundError') {
+      showToast('No camera found', 'error');
+    } else {
+      showToast('Camera error: ' + error.message, 'error');
+    }
   }
 }
 
@@ -108,16 +149,16 @@ async function switchCamera() {
 function initGeolocation() {
   if (!navigator.geolocation) {
     document.getElementById('gpsText').textContent = 'GPS not supported';
+    document.getElementById('coordsText').textContent = '—';
     return;
   }
   
   const options = {
     enableHighAccuracy: true,
-    timeout: 10000,
-    maximumAge: 0
+    timeout: 15000,
+    maximumAge: 5000
   };
   
-  // Watch position for continuous updates
   navigator.geolocation.watchPosition(
     updatePosition,
     handleGeoError,
@@ -129,16 +170,15 @@ function initGeolocation() {
 function updatePosition(position) {
   state.position = position;
   
-  const { latitude, longitude, accuracy, altitude, altitudeAccuracy, heading, speed } = position.coords;
-  const timestamp = new Date(position.timestamp);
+  const { latitude, longitude, accuracy, altitude } = position.coords;
   
-  // Update UI
+  // Update camera overlay
   document.getElementById('gpsStatus').className = 'w-2 h-2 bg-green-500 rounded-full';
   document.getElementById('gpsText').textContent = 'GPS locked';
-  
   document.getElementById('coordsText').textContent = 
     `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
   
+  // Update details panel
   document.getElementById('latitude').textContent = latitude.toFixed(6) + '°';
   document.getElementById('longitude').textContent = longitude.toFixed(6) + '°';
   document.getElementById('accuracy').textContent = 
@@ -155,6 +195,7 @@ function handleGeoError(error) {
   console.error('Geolocation error:', error);
   
   document.getElementById('gpsStatus').className = 'w-2 h-2 bg-yellow-500 rounded-full';
+  document.getElementById('coordsText').textContent = 'Location unavailable';
   
   switch(error.code) {
     case error.PERMISSION_DENIED:
@@ -169,23 +210,32 @@ function handleGeoError(error) {
     default:
       document.getElementById('gpsText').textContent = 'GPS error';
   }
+  
+  document.getElementById('latitude').textContent = '—';
+  document.getElementById('longitude').textContent = '—';
+  document.getElementById('accuracy').textContent = '—';
+  document.getElementById('altitude').textContent = '—';
 }
 
 // Reverse geocode
-async function reverseGeocode(lat, lng) {
-  try {
-    const response = await fetch(
-      `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`,
-      { headers: { 'Accept-Language': 'en' } }
-    );
-    const data = await response.json();
-    
-    if (data.display_name) {
-      document.getElementById('address').textContent = data.display_name;
+let geocodeTimeout = null;
+function reverseGeocode(lat, lng) {
+  clearTimeout(geocodeTimeout);
+  geocodeTimeout = setTimeout(async () => {
+    try {
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=16&addressdetails=1`,
+        { headers: { 'Accept-Language': 'en' } }
+      );
+      const data = await response.json();
+      
+      if (data.display_name) {
+        document.getElementById('address').textContent = data.display_name;
+      }
+    } catch (error) {
+      document.getElementById('address').textContent = 'Address unavailable';
     }
-  } catch (error) {
-    document.getElementById('address').textContent = 'Address unavailable';
-  }
+  }, 1000);
 }
 
 // Capture photo
@@ -200,11 +250,11 @@ async function capturePhoto() {
   const ctx = canvas.getContext('2d');
   
   // Set canvas size to video size
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
+  canvas.width = video.videoWidth || 1920;
+  canvas.height = video.videoHeight || 1080;
   
   // Draw video frame
-  ctx.drawImage(video, 0, 0);
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   
   // Add overlay if enabled
   if (state.settings.timestampOnImage || state.settings.coordsOnImage) {
@@ -214,14 +264,14 @@ async function capturePhoto() {
   // Flash effect
   const flash = document.getElementById('flashOverlay');
   flash.classList.add('capture-flash');
-  flash.style.opacity = '1';
+  flash.style.opacity = '0.8';
   setTimeout(() => {
     flash.style.opacity = '0';
     flash.classList.remove('capture-flash');
-  }, 300);
+  }, 200);
   
   // Get image data
-  const imageData = canvas.toDataURL('image/jpeg', 0.9);
+  const imageData = canvas.toDataURL('image/jpeg', 0.92);
   
   // Create photo record
   const photo = {
@@ -260,126 +310,56 @@ async function capturePhoto() {
   if (state.settings.autoSave) {
     saveToDevice(photo);
   } else {
-    showToast('Photo captured! 📸');
+    showToast('Photo captured! 📸', 'success');
   }
   
   // Vibrate if available
   if (navigator.vibrate) {
-    navigator.vibrate(100);
+    navigator.vibrate([50, 30, 50]);
   }
-}
-
-// Save photo to device (downloads folder / camera roll)
-async function saveToDevice(photo) {
-  try {
-    // Try using File System Access API (newer browsers)
-    if ('showSaveFilePicker' in window) {
-      const handle = await window.showSaveFilePicker({
-        suggestedName: `${photo.id}.jpg`,
-        types: [{
-          description: 'JPEG Image',
-          accept: { 'image/jpeg': ['.jpg'] }
-        }]
-      });
-      
-      const writable = await handle.createWritable();
-      const response = await fetch(photo.imageData);
-      await writable.write(await response.blob());
-      await writable.close();
-      
-      showToast('Photo saved to device! 💾');
-      return;
-    }
-    
-    // Fallback: Try Web Share API with file (works on mobile for camera roll)
-    if (navigator.share && navigator.canShare) {
-      const response = await fetch(photo.imageData);
-      const blob = await response.blob();
-      const file = new File([blob], `${photo.id}.jpg`, { type: 'image/jpeg' });
-      
-      if (navigator.canShare({ files: [file] })) {
-        await navigator.share({
-          files: [file],
-          title: `TraceCam Photo ${photo.id}`,
-          text: `Captured at ${photo.timestampLocal}\nLocation: ${photo.location?.latitude.toFixed(6)}, ${photo.location?.longitude.toFixed(6)}`
-        });
-        showToast('Photo saved! 📸');
-        return;
-      }
-    }
-    
-    // Final fallback: Direct download
-    downloadPhotoDirect(photo);
-    
-  } catch (error) {
-    // User cancelled or error - just show normal toast
-    if (error.name !== 'AbortError') {
-      console.error('Save error:', error);
-      showToast('Photo captured (saved to app only)');
-    }
-  }
-}
-
-// Direct download fallback
-function downloadPhotoDirect(photo) {
-  const link = document.createElement('a');
-  link.href = photo.imageData;
-  link.download = `${photo.id}.jpg`;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  showToast('Photo downloaded! 📥');
-}
-
-// Save all photos as zip (bulk download)
-async function saveAllPhotos() {
-  if (state.photos.length === 0) {
-    showToast('No photos to save', 'error');
-    return;
-  }
-  
-  showToast(`Downloading ${state.photos.length} photos...`);
-  
-  // Download each photo with small delay
-  for (let i = 0; i < state.photos.length; i++) {
-    const photo = state.photos[i];
-    downloadPhotoDirect(photo);
-    await new Promise(resolve => setTimeout(resolve, 300));
-  }
-  
-  showToast('All photos downloaded! 📥');
 }
 
 // Add metadata overlay to image
 function addMetadataOverlay(ctx, width, height) {
-  const padding = 20;
-  const lineHeight = 24;
+  const scale = height / 1080;
+  const padding = 20 * scale;
+  const fontSize = Math.max(14, 18 * scale);
+  const lineHeight = fontSize * 1.6;
+  
+  // Semi-transparent background at bottom
+  const bgHeight = lineHeight * 4;
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.fillRect(0, height - bgHeight, width, bgHeight);
+  
+  // Text settings
+  ctx.font = `${fontSize}px monospace`;
+  ctx.fillStyle = 'white';
+  ctx.textBaseline = 'bottom';
+  
   let y = height - padding;
   
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-  ctx.fillRect(0, height - 120, width, 120);
-  
-  ctx.font = '14px monospace';
-  ctx.fillStyle = 'white';
-  
+  // Timestamp
   if (state.settings.timestampOnImage) {
     const now = new Date();
     ctx.fillText(
       `📅 ${now.toLocaleString()} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`,
       padding,
-      y - lineHeight * 2
+      y
     );
+    y -= lineHeight;
     ctx.fillText(
       `UTC: ${now.toISOString()}`,
       padding,
-      y - lineHeight
+      y
     );
+    y -= lineHeight;
   }
   
+  // Coordinates
   if (state.settings.coordsOnImage && state.position) {
-    const { latitude, longitude } = state.position.coords;
+    const { latitude, longitude, accuracy } = state.position.coords;
     ctx.fillText(
-      `📍 ${latitude.toFixed(6)}, ${longitude.toFixed(6)}`,
+      `📍 ${latitude.toFixed(6)}, ${longitude.toFixed(6)} (±${accuracy?.toFixed(0) || '?'}m)`,
       padding,
       y
     );
@@ -387,9 +367,11 @@ function addMetadataOverlay(ctx, width, height) {
   
   // Watermark
   if (state.settings.watermarkEnabled) {
-    ctx.font = 'bold 16px sans-serif';
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
-    ctx.fillText('TraceCam 📍', width - 120, height - 20);
+    ctx.font = `bold ${fontSize * 0.9}px sans-serif`;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+    ctx.textAlign = 'right';
+    ctx.fillText('TraceCam 📍', width - padding, height - padding);
+    ctx.textAlign = 'left';
   }
 }
 
@@ -407,7 +389,10 @@ function getDeviceInfo() {
   
   if (/iPhone/.test(ua)) device = 'iPhone';
   else if (/iPad/.test(ua)) device = 'iPad';
-  else if (/Android/.test(ua)) device = 'Android';
+  else if (/Android/.test(ua)) {
+    const match = ua.match(/Android\s+([\d.]+)/);
+    device = match ? `Android ${match[1]}` : 'Android';
+  }
   else if (/Windows/.test(ua)) device = 'Windows';
   else if (/Mac/.test(ua)) device = 'Mac';
   else if (/Linux/.test(ua)) device = 'Linux';
@@ -423,6 +408,21 @@ function updateDeviceInfo() {
 // Update session ID display
 function updateSessionId() {
   document.getElementById('sessionId').textContent = state.sessionId;
+}
+
+// Toggle details panel
+function toggleDetails() {
+  state.detailsExpanded = !state.detailsExpanded;
+  const panel = document.getElementById('detailsPanel');
+  const arrow = document.getElementById('detailsArrow');
+  
+  if (state.detailsExpanded) {
+    panel.classList.remove('hidden');
+    arrow.style.transform = 'rotate(180deg)';
+  } else {
+    panel.classList.add('hidden');
+    arrow.style.transform = 'rotate(0)';
+  }
 }
 
 // Add log entry
@@ -450,11 +450,15 @@ function addLog(photo) {
 // Save photos to localStorage
 function savePhotos() {
   try {
-    // Only keep last 50 photos in localStorage to avoid quota issues
     const photosToSave = state.photos.slice(0, 50);
     localStorage.setItem(PHOTOS_KEY, JSON.stringify(photosToSave));
   } catch (error) {
     console.error('Failed to save photos:', error);
+    // If quota exceeded, remove oldest photos
+    if (error.name === 'QuotaExceededError') {
+      state.photos = state.photos.slice(0, 20);
+      localStorage.setItem(PHOTOS_KEY, JSON.stringify(state.photos));
+    }
   }
 }
 
@@ -500,12 +504,12 @@ function saveSettings() {
     coordsOnImage: document.getElementById('coordsOnImage').checked,
     timestampOnImage: document.getElementById('timestampOnImage').checked,
     autoSave: document.getElementById('autoSave').checked,
-    projectName: document.getElementById('projectName').value,
-    operatorName: document.getElementById('operatorName').value
+    projectName: document.getElementById('projectName').value.trim(),
+    operatorName: document.getElementById('operatorName').value.trim()
   };
   
   localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
-  showToast('Settings saved');
+  showToast('Settings saved', 'success');
   closeSettings();
 }
 
@@ -515,42 +519,127 @@ function loadSettings() {
     const saved = localStorage.getItem(SETTINGS_KEY);
     if (saved) {
       state.settings = { ...state.settings, ...JSON.parse(saved) };
-      
-      document.getElementById('watermarkEnabled').checked = state.settings.watermarkEnabled;
-      document.getElementById('coordsOnImage').checked = state.settings.coordsOnImage;
-      document.getElementById('timestampOnImage').checked = state.settings.timestampOnImage;
-      document.getElementById('autoSave').checked = state.settings.autoSave ?? true;
-      document.getElementById('projectName').value = state.settings.projectName;
-      document.getElementById('operatorName').value = state.settings.operatorName;
-    } else {
-      // Default: auto-save enabled
-      document.getElementById('autoSave').checked = true;
     }
+    
+    document.getElementById('watermarkEnabled').checked = state.settings.watermarkEnabled;
+    document.getElementById('coordsOnImage').checked = state.settings.coordsOnImage;
+    document.getElementById('timestampOnImage').checked = state.settings.timestampOnImage;
+    document.getElementById('autoSave').checked = state.settings.autoSave ?? true;
+    document.getElementById('projectName').value = state.settings.projectName || '';
+    document.getElementById('operatorName').value = state.settings.operatorName || '';
   } catch (error) {
     console.error('Failed to load settings:', error);
+    document.getElementById('autoSave').checked = true;
   }
 }
 
 // Update photo count badge
 function updatePhotoCount() {
   const badge = document.getElementById('photoCount');
+  const summary = document.getElementById('gallerySummary');
+  
   if (state.photos.length > 0) {
     badge.textContent = state.photos.length;
     badge.classList.remove('hidden');
+    summary.textContent = `${state.photos.length} photo${state.photos.length > 1 ? 's' : ''}`;
   } else {
     badge.classList.add('hidden');
+    summary.textContent = 'No photos';
   }
 }
 
 // Update log count badge
 function updateLogCount() {
   const badge = document.getElementById('logCount');
+  const summary = document.getElementById('logsSummary');
+  
   if (state.logs.length > 0) {
     badge.textContent = state.logs.length;
     badge.classList.remove('hidden');
+    summary.textContent = `${state.logs.length} capture${state.logs.length > 1 ? 's' : ''} logged`;
   } else {
     badge.classList.add('hidden');
+    summary.textContent = 'No captures yet';
   }
+}
+
+// Save photo to device
+async function saveToDevice(photo) {
+  try {
+    // Try File System Access API
+    if ('showSaveFilePicker' in window) {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: `${photo.id}.jpg`,
+        types: [{
+          description: 'JPEG Image',
+          accept: { 'image/jpeg': ['.jpg'] }
+        }]
+      });
+      
+      const writable = await handle.createWritable();
+      const response = await fetch(photo.imageData);
+      await writable.write(await response.blob());
+      await writable.close();
+      
+      showToast('Photo saved! 💾', 'success');
+      return;
+    }
+    
+    // Try Web Share API
+    if (navigator.share && navigator.canShare) {
+      const response = await fetch(photo.imageData);
+      const blob = await response.blob();
+      const file = new File([blob], `${photo.id}.jpg`, { type: 'image/jpeg' });
+      
+      if (navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: `TraceCam ${photo.id}`,
+        });
+        showToast('Photo saved! 📸', 'success');
+        return;
+      }
+    }
+    
+    // Fallback: direct download
+    downloadPhotoDirect(photo);
+    
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      showToast('Photo captured! 📸', 'success');
+    } else {
+      console.error('Save error:', error);
+      showToast('Photo captured (saved to app)', 'success');
+    }
+  }
+}
+
+// Direct download
+function downloadPhotoDirect(photo) {
+  const link = document.createElement('a');
+  link.href = photo.imageData;
+  link.download = `${photo.id}.jpg`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  showToast('Photo downloaded! 📥', 'success');
+}
+
+// Save all photos
+async function saveAllPhotos() {
+  if (state.photos.length === 0) {
+    showToast('No photos to save', 'error');
+    return;
+  }
+  
+  showToast(`Saving ${state.photos.length} photos...`);
+  
+  for (let i = 0; i < state.photos.length; i++) {
+    downloadPhotoDirect(state.photos[i]);
+    await new Promise(resolve => setTimeout(resolve, 400));
+  }
+  
+  showToast(`Saved ${state.photos.length} photos! 📥`, 'success');
 }
 
 // Show gallery
@@ -558,13 +647,23 @@ function showGallery() {
   const container = document.getElementById('galleryContainer');
   
   if (state.photos.length === 0) {
-    container.innerHTML = '<p class="text-slate-500 text-center py-8 col-span-2">No photos yet</p>';
+    container.innerHTML = `
+      <div class="col-span-2 text-center py-12">
+        <div class="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4">
+          <svg class="w-8 h-8 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+          </svg>
+        </div>
+        <p class="text-slate-500 text-sm">No photos yet</p>
+        <p class="text-slate-600 text-xs mt-1">Captured photos will appear here</p>
+      </div>
+    `;
   } else {
     container.innerHTML = state.photos.map(photo => `
-      <div class="aspect-square bg-slate-800 rounded-lg overflow-hidden relative cursor-pointer hover:ring-2 hover:ring-emerald-500 transition" onclick="previewPhoto('${photo.id}')">
-        <img src="${photo.imageData}" class="w-full h-full object-cover" alt="Photo">
-        <div class="absolute bottom-0 left-0 right-0 bg-black/60 px-2 py-1">
-          <p class="text-xs font-mono truncate">${photo.id}</p>
+      <div class="aspect-square bg-slate-800 rounded-xl overflow-hidden relative cursor-pointer group" onclick="previewPhoto('${photo.id}')">
+        <img src="${photo.imageData}" class="w-full h-full object-cover transition group-hover:scale-105" alt="Photo ${photo.id}" loading="lazy">
+        <div class="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 to-transparent px-2 py-2">
+          <p class="text-[10px] font-mono text-white/80 truncate">${photo.id}</p>
         </div>
       </div>
     `).join('');
@@ -587,15 +686,15 @@ function previewPhoto(photoId) {
   
   document.getElementById('previewImage').src = photo.imageData;
   document.getElementById('previewMetadata').innerHTML = `
-    <p><strong>ID:</strong> ${photo.id}</p>
-    <p><strong>Time:</strong> ${photo.timestampLocal} (${photo.timezone})</p>
-    <p><strong>UTC:</strong> ${photo.timestamp}</p>
-    ${photo.location ? `<p><strong>Location:</strong> ${photo.location.latitude.toFixed(6)}, ${photo.location.longitude.toFixed(6)}</p>` : ''}
-    ${photo.location?.accuracy ? `<p><strong>Accuracy:</strong> ±${photo.location.accuracy.toFixed(1)}m</p>` : ''}
-    ${photo.address ? `<p><strong>Address:</strong> ${photo.address}</p>` : ''}
-    <p><strong>Session:</strong> ${photo.sessionId}</p>
-    ${photo.projectName ? `<p><strong>Project:</strong> ${photo.projectName}</p>` : ''}
-    ${photo.operatorName ? `<p><strong>Operator:</strong> ${photo.operatorName}</p>` : ''}
+    <p class="flex justify-between"><span class="text-slate-500">ID:</span><span class="text-white">${photo.id}</span></p>
+    <p class="flex justify-between"><span class="text-slate-500">Time:</span><span class="text-white">${photo.timestampLocal}</span></p>
+    <p class="flex justify-between"><span class="text-slate-500">Timezone:</span><span class="text-white">${photo.timezone}</span></p>
+    ${photo.location ? `<p class="flex justify-between"><span class="text-slate-500">Location:</span><span class="text-emerald-400">${photo.location.latitude.toFixed(6)}, ${photo.location.longitude.toFixed(6)}</span></p>` : ''}
+    ${photo.location?.accuracy ? `<p class="flex justify-between"><span class="text-slate-500">Accuracy:</span><span class="text-white">±${photo.location.accuracy.toFixed(1)}m</span></p>` : ''}
+    ${photo.address ? `<p class="flex justify-between"><span class="text-slate-500">Address:</span><span class="text-white text-right ml-2 truncate">${photo.address}</span></p>` : ''}
+    <p class="flex justify-between"><span class="text-slate-500">Session:</span><span class="text-white">${photo.sessionId}</span></p>
+    ${photo.projectName ? `<p class="flex justify-between"><span class="text-slate-500">Project:</span><span class="text-white">${photo.projectName}</span></p>` : ''}
+    ${photo.operatorName ? `<p class="flex justify-between"><span class="text-slate-500">Operator:</span><span class="text-white">${photo.operatorName}</span></p>` : ''}
   `;
   
   document.getElementById('previewModal').classList.remove('hidden');
@@ -612,15 +711,10 @@ async function sharePhoto() {
   if (!state.currentPreview) return;
   
   const photo = state.currentPreview;
-  const text = `TraceCam Photo\n\n` +
-    `ID: ${photo.id}\n` +
-    `Time: ${photo.timestampLocal}\n` +
-    `Location: ${photo.location?.latitude.toFixed(6)}, ${photo.location?.longitude.toFixed(6)}\n` +
-    `Session: ${photo.sessionId}`;
+  const text = `TraceCam Photo\n${photo.id}\n${photo.timestampLocal}\n${photo.location?.latitude.toFixed(6)}, ${photo.location?.longitude.toFixed(6)}`;
   
   if (navigator.share) {
     try {
-      // Convert data URL to blob
       const response = await fetch(photo.imageData);
       const blob = await response.blob();
       const file = new File([blob], `${photo.id}.jpg`, { type: 'image/jpeg' });
@@ -631,13 +725,14 @@ async function sharePhoto() {
         files: [file]
       });
     } catch (e) {
-      // Fallback to clipboard
-      await navigator.clipboard.writeText(text);
-      showToast('Copied to clipboard');
+      if (e.name !== 'AbortError') {
+        await navigator.clipboard.writeText(text);
+        showToast('Copied to clipboard', 'success');
+      }
     }
   } else {
     await navigator.clipboard.writeText(text);
-    showToast('Copied to clipboard');
+    showToast('Copied to clipboard', 'success');
   }
 }
 
@@ -652,19 +747,29 @@ function showLogs() {
   const container = document.getElementById('logsContainer');
   
   if (state.logs.length === 0) {
-    container.innerHTML = '<p class="text-slate-500 text-center py-8">No captures yet</p>';
+    container.innerHTML = `
+      <div class="text-center py-12">
+        <div class="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mx-auto mb-4">
+          <svg class="w-8 h-8 text-slate-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+          </svg>
+        </div>
+        <p class="text-slate-500 text-sm">No captures yet</p>
+        <p class="text-slate-600 text-xs mt-1">Take a photo to start logging</p>
+      </div>
+    `;
   } else {
     container.innerHTML = state.logs.map(log => `
       <div class="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50 mb-3">
         <div class="flex items-center justify-between mb-2">
           <span class="font-mono text-sm text-emerald-400">${log.id}</span>
-          <span class="text-xs text-slate-500">${log.timestampLocal}</span>
+          <span class="text-[10px] text-slate-500">${log.timestampLocal}</span>
         </div>
         <div class="text-xs space-y-1 text-slate-400">
-          ${log.latitude ? `<p>📍 ${log.latitude.toFixed(6)}, ${log.longitude.toFixed(6)} (±${log.accuracy?.toFixed(1)}m)</p>` : '<p>📍 No location</p>'}
-          <p>🕐 ${log.timezone}</p>
-          ${log.projectName ? `<p>📁 ${log.projectName}</p>` : ''}
-          ${log.operatorName ? `<p>👤 ${log.operatorName}</p>` : ''}
+          ${log.latitude ? `<p class="flex items-center gap-1"><span>📍</span> ${log.latitude.toFixed(6)}, ${log.longitude.toFixed(6)} <span class="text-slate-600">(±${log.accuracy?.toFixed(0) || '?'}m)</span></p>` : '<p class="text-slate-600">📍 No location</p>'}
+          <p class="flex items-center gap-1"><span>🕐</span> ${log.timezone}</p>
+          ${log.projectName ? `<p class="flex items-center gap-1"><span>📁</span> ${log.projectName}</p>` : ''}
+          ${log.operatorName ? `<p class="flex items-center gap-1"><span>👤</span> ${log.operatorName}</p>` : ''}
         </div>
       </div>
     `).join('');
@@ -685,7 +790,7 @@ function clearLogs() {
     saveLogs();
     updateLogCount();
     showLogs();
-    showToast('Logs cleared');
+    showToast('Logs cleared', 'success');
   }
 }
 
@@ -718,7 +823,6 @@ function exportLogs() {
   ]);
   
   const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
-  
   const blob = new Blob([csv], { type: 'text/csv' });
   const url = URL.createObjectURL(blob);
   
@@ -728,7 +832,7 @@ function exportLogs() {
   link.click();
   
   URL.revokeObjectURL(url);
-  showToast('Logs exported');
+  showToast('Logs exported!', 'success');
 }
 
 // Show settings
@@ -744,14 +848,33 @@ function closeSettings() {
 // Show toast
 function showToast(message, type = 'info') {
   const toast = document.getElementById('toast');
-  document.getElementById('toastText').textContent = message;
+  const toastText = document.getElementById('toastText');
+  const toastIcon = document.getElementById('toastIcon');
   
-  toast.className = toast.className.replace(/bg-\w+-\d+/g, '');
-  toast.classList.add(type === 'error' ? 'bg-red-600' : type === 'success' ? 'bg-emerald-600' : 'bg-slate-800');
+  toastText.textContent = message;
+  
+  // Set icon and color based on type
+  if (type === 'success') {
+    toastIcon.textContent = '✓';
+    toast.className = toast.className.replace(/bg-\w+-\d+/g, '');
+    toast.classList.add('bg-emerald-600');
+  } else if (type === 'error') {
+    toastIcon.textContent = '✕';
+    toast.className = toast.className.replace(/bg-\w+-\d+/g, '');
+    toast.classList.add('bg-red-600');
+  } else {
+    toastIcon.textContent = 'ℹ';
+    toast.className = toast.className.replace(/bg-\w+-\d+/g, '');
+    toast.classList.add('bg-slate-700');
+  }
   
   toast.style.opacity = '1';
+  toast.style.transform = 'translateY(0)';
+  toast.style.pointerEvents = 'auto';
   
   setTimeout(() => {
     toast.style.opacity = '0';
-  }, 2000);
+    toast.style.transform = 'translateY(-8px)';
+    toast.style.pointerEvents = 'none';
+  }, 2500);
 }
