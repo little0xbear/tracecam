@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>TraceCam 📍 - GPS Camera for Traceability</title>
+  <meta name="description" content="Camera app with GPS, timestamp, and metadata logging for traceability">
+  <meta name="theme-color" content="#0f172a">
+  
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    * { -webkit-tap-highlight-color: transparent; }
+    body { 
+      overscroll-behavior: none;
+      touch-action: manipulation;
+    }
+    .camera-container {
+      position: relative;
+      width: 100%;
+      padding-top: 133.33%; /* 4:3 aspect ratio */
+      background: #000;
+      overflow: hidden;
+    }
+    .camera-container video, .camera-container canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .overlay-text {
+      text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+    }
+    .capture-flash {
+      animation: flash 0.3s ease-out;
+    }
+    @keyframes flash {
+      0% { opacity: 1; }
+      100% { opacity: 0; }
+    }
+    .pulse-ring {
+      animation: pulse-ring 1.5s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+    }
+    @keyframes pulse-ring {
+      0% { transform: scale(0.8); opacity: 1; }
+      80%, 100% { transform: scale(1.3); opacity: 0; }
+    }
+  </style>
+</head>
+<body class="bg-slate-900 text-white font-sans min-h-screen">
+  
+  <!-- Header -->
+  <header class="fixed top-0 left-0 right-0 z-50 bg-slate-900/95 backdrop-blur-md border-b border-slate-800">
+    <div class="px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 bg-gradient-to-br from-emerald-400 to-emerald-600 rounded-xl flex items-center justify-center text-xl shadow-lg">
+          📍
+        </div>
+        <div>
+          <h1 class="text-lg font-bold">TraceCam</h1>
+          <p class="text-xs text-slate-500" id="statusText">Initializing...</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button onclick="showLogs()" class="p-2 hover:bg-slate-800 rounded-lg transition relative">
+          <svg class="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+          </svg>
+          <span id="logCount" class="absolute -top-1 -right-1 w-5 h-5 bg-emerald-500 rounded-full text-xs flex items-center justify-center hidden">0</span>
+        </button>
+        <button onclick="showSettings()" class="p-2 hover:bg-slate-800 rounded-lg transition">
+          <svg class="w-5 h-5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="pt-16 pb-24">
+    
+    <!-- Camera View -->
+    <div class="relative">
+      <div class="camera-container" id="cameraContainer">
+        <video id="videoElement" autoplay playsinline muted></video>
+        <canvas id="captureCanvas" class="hidden"></canvas>
+        
+        <!-- Flash overlay -->
+        <div id="flashOverlay" class="absolute inset-0 bg-white opacity-0 pointer-events-none"></div>
+        
+        <!-- GPS Overlay -->
+        <div class="absolute top-4 left-4 right-4 text-white text-xs font-mono space-y-1">
+          <div class="flex items-center gap-2 overlay-text">
+            <span id="gpsStatus" class="w-2 h-2 bg-red-500 rounded-full"></span>
+            <span id="gpsText">Acquiring GPS...</span>
+          </div>
+          <div class="overlay-text opacity-80" id="coordsText">—</div>
+        </div>
+        
+        <!-- Timestamp Overlay -->
+        <div class="absolute bottom-4 left-4 right-4">
+          <div class="bg-black/60 backdrop-blur-sm rounded-xl p-3 text-white">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-xs text-slate-400">CAPTURE TIME</span>
+              <span class="text-xs bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded" id="timezoneBadge">—</span>
+            </div>
+            <div class="font-mono text-lg" id="liveTime">—</div>
+            <div class="font-mono text-xs text-slate-400 mt-1" id="liveTimeUTC">—</div>
+          </div>
+        </div>
+      </div>
+      
+      <!-- Location Details (below camera) -->
+      <div class="px-4 py-4 space-y-3" id="locationDetails">
+        <div class="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
+          <p class="text-xs text-slate-500 mb-2">📍 LOCATION</p>
+          <div class="space-y-2 text-sm">
+            <div class="flex justify-between">
+              <span class="text-slate-400">Latitude</span>
+              <span class="font-mono" id="latitude">—</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Longitude</span>
+              <span class="font-mono" id="longitude">—</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Accuracy</span>
+              <span class="font-mono" id="accuracy">—</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Altitude</span>
+              <span class="font-mono" id="altitude">—</span>
+            </div>
+          </div>
+        </div>
+        
+        <div class="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
+          <p class="text-xs text-slate-500 mb-2">🌐 ADDRESS</p>
+          <p class="text-sm text-slate-300" id="address">Fetching address...</p>
+        </div>
+        
+        <div class="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
+          <p class="text-xs text-slate-500 mb-2">📱 DEVICE INFO</p>
+          <div class="space-y-2 text-sm">
+            <div class="flex justify-between">
+              <span class="text-slate-400">Device</span>
+              <span id="deviceInfo">—</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Session ID</span>
+              <span class="font-mono text-xs" id="sessionId">—</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Capture Button -->
+  <div class="fixed bottom-0 left-0 right-0 bg-gradient-to-t from-slate-900 to-transparent pt-8 pb-6 px-4">
+    <div class="flex items-center justify-center gap-6">
+      <button onclick="switchCamera()" class="p-3 bg-slate-800 rounded-full hover:bg-slate-700 transition">
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+        </svg>
+      </button>
+      
+      <button onclick="capturePhoto()" class="relative">
+        <div class="absolute inset-0 bg-emerald-500/30 rounded-full pulse-ring"></div>
+        <div class="w-20 h-20 bg-white rounded-full flex items-center justify-center shadow-lg hover:scale-105 transition">
+          <div class="w-16 h-16 bg-emerald-500 rounded-full flex items-center justify-center">
+            <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"></path>
+            </svg>
+          </div>
+        </div>
+      </button>
+      
+      <button onclick="showGallery()" class="p-3 bg-slate-800 rounded-full hover:bg-slate-700 transition relative">
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+        </svg>
+        <span id="photoCount" class="absolute -top-1 -right-1 w-5 h-5 bg-blue-500 rounded-full text-xs flex items-center justify-center hidden">0</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Logs Modal -->
+  <div id="logsModal" class="fixed inset-0 bg-black/90 z-50 hidden">
+    <div class="h-full flex flex-col">
+      <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+        <h2 class="text-lg font-bold">Capture Logs</h2>
+        <div class="flex items-center gap-2">
+          <button onclick="exportLogs()" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 rounded-lg text-sm font-medium transition">
+            Export CSV
+          </button>
+          <button onclick="closeLogs()" class="p-2 hover:bg-slate-800 rounded-lg">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="flex-1 overflow-y-auto p-4" id="logsContainer">
+        <p class="text-slate-500 text-center py-8">No captures yet</p>
+      </div>
+      <div class="p-4 border-t border-slate-800">
+        <button onclick="clearLogs()" class="w-full py-3 bg-red-600/20 hover:bg-red-600/30 text-red-400 rounded-xl text-sm font-medium transition">
+          Clear All Logs
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Gallery Modal -->
+  <div id="galleryModal" class="fixed inset-0 bg-black/90 z-50 hidden">
+    <div class="h-full flex flex-col">
+      <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+        <h2 class="text-lg font-bold">Gallery</h2>
+        <button onclick="closeGallery()" class="p-2 hover:bg-slate-800 rounded-lg">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="flex-1 overflow-y-auto p-4 grid grid-cols-2 gap-2" id="galleryContainer">
+        <p class="text-slate-500 text-center py-8 col-span-2">No photos yet</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settingsModal" class="fixed inset-0 bg-black/90 z-50 hidden">
+    <div class="h-full flex flex-col">
+      <div class="p-4 border-b border-slate-800 flex items-center justify-between">
+        <h2 class="text-lg font-bold">Settings</h2>
+        <button onclick="closeSettings()" class="p-2 hover:bg-slate-800 rounded-lg">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="flex-1 overflow-y-auto p-4 space-y-4">
+        <div class="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
+          <p class="text-sm font-medium mb-3">Capture Options</p>
+          <label class="flex items-center justify-between py-2">
+            <span class="text-sm text-slate-300">Embed watermark</span>
+            <input type="checkbox" id="watermarkEnabled" class="w-5 h-5 rounded bg-slate-700 border-slate-600 text-emerald-500 focus:ring-emerald-500">
+          </label>
+          <label class="flex items-center justify-between py-2">
+            <span class="text-sm text-slate-300">Include coordinates on image</span>
+            <input type="checkbox" id="coordsOnImage" checked class="w-5 h-5 rounded bg-slate-700 border-slate-600 text-emerald-500 focus:ring-emerald-500">
+          </label>
+          <label class="flex items-center justify-between py-2">
+            <span class="text-sm text-slate-300">Include timestamp on image</span>
+            <input type="checkbox" id="timestampOnImage" checked class="w-5 h-5 rounded bg-slate-700 border-slate-600 text-emerald-500 focus:ring-emerald-500">
+          </label>
+        </div>
+        
+        <div class="bg-slate-800/50 rounded-xl p-4 border border-slate-700/50">
+          <p class="text-sm font-medium mb-3">Project Info</p>
+          <input type="text" id="projectName" placeholder="Project name (optional)" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500 focus:border-transparent">
+          <input type="text" id="operatorName" placeholder="Operator name (optional)" class="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm mt-2 focus:ring-2 focus:ring-emerald-500 focus:border-transparent">
+        </div>
+        
+        <button onclick="saveSettings()" class="w-full py-3 bg-emerald-600 hover:bg-emerald-700 rounded-xl font-medium transition">
+          Save Settings
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Photo Preview Modal -->
+  <div id="previewModal" class="fixed inset-0 bg-black z-50 hidden">
+    <div class="h-full flex flex-col">
+      <div class="p-4 flex items-center justify-between">
+        <button onclick="closePreview()" class="p-2 hover:bg-slate-800 rounded-lg">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+          </svg>
+        </button>
+        <div class="flex items-center gap-2">
+          <button onclick="sharePhoto()" class="p-2 hover:bg-slate-800 rounded-lg">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"></path>
+            </svg>
+          </button>
+          <button onclick="downloadPhoto()" class="p-2 hover:bg-slate-800 rounded-lg">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="flex-1 flex items-center justify-center p-4">
+        <img id="previewImage" class="max-w-full max-h-full object-contain" src="" alt="Preview">
+      </div>
+      <div class="p-4 bg-slate-900/90">
+        <div class="text-xs font-mono text-slate-400 space-y-1" id="previewMetadata">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="fixed top-20 left-4 right-4 max-w-md mx-auto px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-sm font-medium z-50 flex items-center justify-center gap-2 opacity-0 transition-opacity pointer-events-none">
+    <span id="toastText">Photo captured!</span>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
