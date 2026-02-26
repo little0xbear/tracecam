@@ -13,6 +13,7 @@ const state = {
     watermarkEnabled: false,
     coordsOnImage: true,
     timestampOnImage: true,
+    autoSave: true,
     projectName: '',
     operatorName: ''
   },
@@ -255,12 +256,98 @@ async function capturePhoto() {
   // Update UI
   updatePhotoCount();
   
-  showToast('Photo captured! 📸');
+  // Auto-save to device if enabled
+  if (state.settings.autoSave) {
+    saveToDevice(photo);
+  } else {
+    showToast('Photo captured! 📸');
+  }
   
   // Vibrate if available
   if (navigator.vibrate) {
     navigator.vibrate(100);
   }
+}
+
+// Save photo to device (downloads folder / camera roll)
+async function saveToDevice(photo) {
+  try {
+    // Try using File System Access API (newer browsers)
+    if ('showSaveFilePicker' in window) {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: `${photo.id}.jpg`,
+        types: [{
+          description: 'JPEG Image',
+          accept: { 'image/jpeg': ['.jpg'] }
+        }]
+      });
+      
+      const writable = await handle.createWritable();
+      const response = await fetch(photo.imageData);
+      await writable.write(await response.blob());
+      await writable.close();
+      
+      showToast('Photo saved to device! 💾');
+      return;
+    }
+    
+    // Fallback: Try Web Share API with file (works on mobile for camera roll)
+    if (navigator.share && navigator.canShare) {
+      const response = await fetch(photo.imageData);
+      const blob = await response.blob();
+      const file = new File([blob], `${photo.id}.jpg`, { type: 'image/jpeg' });
+      
+      if (navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: `TraceCam Photo ${photo.id}`,
+          text: `Captured at ${photo.timestampLocal}\nLocation: ${photo.location?.latitude.toFixed(6)}, ${photo.location?.longitude.toFixed(6)}`
+        });
+        showToast('Photo saved! 📸');
+        return;
+      }
+    }
+    
+    // Final fallback: Direct download
+    downloadPhotoDirect(photo);
+    
+  } catch (error) {
+    // User cancelled or error - just show normal toast
+    if (error.name !== 'AbortError') {
+      console.error('Save error:', error);
+      showToast('Photo captured (saved to app only)');
+    }
+  }
+}
+
+// Direct download fallback
+function downloadPhotoDirect(photo) {
+  const link = document.createElement('a');
+  link.href = photo.imageData;
+  link.download = `${photo.id}.jpg`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  showToast('Photo downloaded! 📥');
+}
+
+// Save all photos as zip (bulk download)
+async function saveAllPhotos() {
+  if (state.photos.length === 0) {
+    showToast('No photos to save', 'error');
+    return;
+  }
+  
+  showToast(`Downloading ${state.photos.length} photos...`);
+  
+  // Download each photo with small delay
+  for (let i = 0; i < state.photos.length; i++) {
+    const photo = state.photos[i];
+    downloadPhotoDirect(photo);
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+  
+  showToast('All photos downloaded! 📥');
 }
 
 // Add metadata overlay to image
@@ -412,6 +499,7 @@ function saveSettings() {
     watermarkEnabled: document.getElementById('watermarkEnabled').checked,
     coordsOnImage: document.getElementById('coordsOnImage').checked,
     timestampOnImage: document.getElementById('timestampOnImage').checked,
+    autoSave: document.getElementById('autoSave').checked,
     projectName: document.getElementById('projectName').value,
     operatorName: document.getElementById('operatorName').value
   };
@@ -431,8 +519,12 @@ function loadSettings() {
       document.getElementById('watermarkEnabled').checked = state.settings.watermarkEnabled;
       document.getElementById('coordsOnImage').checked = state.settings.coordsOnImage;
       document.getElementById('timestampOnImage').checked = state.settings.timestampOnImage;
+      document.getElementById('autoSave').checked = state.settings.autoSave ?? true;
       document.getElementById('projectName').value = state.settings.projectName;
       document.getElementById('operatorName').value = state.settings.operatorName;
+    } else {
+      // Default: auto-save enabled
+      document.getElementById('autoSave').checked = true;
     }
   } catch (error) {
     console.error('Failed to load settings:', error);
@@ -552,13 +644,7 @@ async function sharePhoto() {
 // Download photo
 function downloadPhoto() {
   if (!state.currentPreview) return;
-  
-  const link = document.createElement('a');
-  link.href = state.currentPreview.imageData;
-  link.download = `${state.currentPreview.id}.jpg`;
-  link.click();
-  
-  showToast('Photo downloaded');
+  downloadPhotoDirect(state.currentPreview);
 }
 
 // Show logs
