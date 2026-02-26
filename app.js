@@ -14,11 +14,14 @@ const state = {
     coordsOnImage: true,
     timestampOnImage: true,
     autoSave: true,
+    fullResolution: true,
+    showLocationDecipher: true,
     projectName: '',
     operatorName: ''
   },
   currentPreview: null,
-  detailsExpanded: false
+  detailsExpanded: false,
+  locationInfo: null
 };
 
 // Storage keys
@@ -186,8 +189,109 @@ function updatePosition(position) {
   document.getElementById('altitude').textContent = 
     altitude ? `${altitude.toFixed(1)}m` : 'N/A';
   
+  // Decipher location
+  decipherLocation(latitude, longitude);
+  
   // Reverse geocode for address
   reverseGeocode(latitude, longitude);
+}
+
+// Decipher location - convert to readable format
+function decipherLocation(lat, lng) {
+  const dms = decimalToDMS(lat, lng);
+  const hemisphere = {
+    lat: lat >= 0 ? 'North' : 'South',
+    lng: lng >= 0 ? 'East' : 'West'
+  };
+  
+  // Determine approximate location type
+  let locationType = 'Unknown area';
+  if (lat >= 66.5) locationType = 'Arctic region';
+  else if (lat <= -66.5) locationType = 'Antarctic region';
+  else if (lat >= 23.5 && lat <= 66.5) locationType = 'Northern temperate zone';
+  else if (lat >= -23.5 && lat <= 23.5) locationType = 'Tropical zone';
+  else if (lat >= -66.5 && lat <= -23.5) locationType = 'Southern temperate zone';
+  
+  // Determine hemisphere season hint
+  const month = new Date().getMonth();
+  const isNorthernSummer = month >= 3 && month <= 8;
+  const seasonHint = lat >= 0 
+    ? (isNorthernSummer ? 'Northern hemisphere (summer)' : 'Northern hemisphere (winter)')
+    : (isNorthernSummer ? 'Southern hemisphere (winter)' : 'Southern hemisphere (summer)');
+  
+  state.locationInfo = {
+    decimal: { lat, lng },
+    dms,
+    hemisphere,
+    locationType,
+    seasonHint,
+    mapUrl: `https://www.google.com/maps?q=${lat},${lng}`,
+    osmUrl: `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=16/${lat}/${lng}`,
+    what3wordsUrl: `https://map.what3words.com/?lat=${lat}&lng=${lng}`
+  };
+  
+  // Update UI if decipher panel exists
+  updateLocationDecipherUI();
+}
+
+// Convert decimal degrees to DMS (Degrees, Minutes, Seconds)
+function decimalToDMS(lat, lng) {
+  const toDMS = (decimal, isLat) => {
+    const absolute = Math.abs(decimal);
+    const degrees = Math.floor(absolute);
+    const minutesDecimal = (absolute - degrees) * 60;
+    const minutes = Math.floor(minutesDecimal);
+    const seconds = ((minutesDecimal - minutes) * 60).toFixed(2);
+    const direction = isLat 
+      ? (decimal >= 0 ? 'N' : 'S')
+      : (decimal >= 0 ? 'E' : 'W');
+    
+    return { degrees, minutes, seconds, direction, formatted: `${degrees}° ${minutes}' ${seconds}" ${direction}` };
+  };
+  
+  return {
+    latitude: toDMS(lat, true),
+    longitude: toDMS(lng, false)
+  };
+}
+
+// Update location decipher UI
+function updateLocationDecipherUI() {
+  const panel = document.getElementById('locationDecipherPanel');
+  if (!panel || !state.locationInfo) return;
+  
+  const info = state.locationInfo;
+  panel.innerHTML = `
+    <div class="space-y-3 text-sm">
+      <div class="bg-slate-700/30 rounded-lg p-3">
+        <p class="text-xs text-slate-500 mb-2">DMS Format (Degrees, Minutes, Seconds)</p>
+        <p class="font-mono text-emerald-400">${info.dms.latitude.formatted}</p>
+        <p class="font-mono text-emerald-400">${info.dms.longitude.formatted}</p>
+      </div>
+      
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <p class="text-xs text-slate-500">Hemisphere</p>
+          <p class="text-slate-300">${info.hemisphere.lat}ern</p>
+        </div>
+        <div>
+          <p class="text-xs text-slate-500">Climate Zone</p>
+          <p class="text-slate-300">${info.locationType}</p>
+        </div>
+      </div>
+      
+      <p class="text-xs text-slate-500">${info.seasonHint}</p>
+      
+      <div class="flex flex-wrap gap-2 pt-2">
+        <a href="${info.mapUrl}" target="_blank" rel="noopener" class="flex-1 py-2 px-3 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 rounded-lg text-xs text-center transition">
+          🗺️ Google Maps
+        </a>
+        <a href="${info.osmUrl}" target="_blank" rel="noopener" class="flex-1 py-2 px-3 bg-green-600/20 hover:bg-green-600/30 text-green-400 rounded-lg text-xs text-center transition">
+          🌍 OpenStreetMap
+        </a>
+      </div>
+    </div>
+  `;
 }
 
 // Handle geolocation error
@@ -249,11 +353,17 @@ async function capturePhoto() {
   const canvas = document.getElementById('captureCanvas');
   const ctx = canvas.getContext('2d');
   
-  // Set canvas size to video size
-  canvas.width = video.videoWidth || 1920;
-  canvas.height = video.videoHeight || 1080;
+  // Get actual camera resolution
+  const track = state.stream.getVideoTracks()[0];
+  const settings = track.getSettings();
+  const actualWidth = settings.width || video.videoWidth || 1920;
+  const actualHeight = settings.height || video.videoHeight || 1080;
   
-  // Draw video frame
+  // Use full camera resolution
+  canvas.width = actualWidth;
+  canvas.height = actualHeight;
+  
+  // Draw video frame at full resolution
   ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
   
   // Add overlay if enabled
@@ -270,14 +380,22 @@ async function capturePhoto() {
     flash.classList.remove('capture-flash');
   }, 200);
   
-  // Get image data
-  const imageData = canvas.toDataURL('image/jpeg', 0.92);
+  // Get image data at full quality
+  const quality = state.settings.fullResolution ? 1.0 : 0.85;
+  const imageData = canvas.toDataURL('image/jpeg', quality);
+  
+  // Calculate file size
+  const fileSizeKB = Math.round((imageData.length * 3) / 4 / 1024);
   
   // Create photo record
   const photo = {
     id: generatePhotoId(),
     sessionId: state.sessionId,
     imageData,
+    imageWidth: canvas.width,
+    imageHeight: canvas.height,
+    fileSizeKB,
+    quality: quality === 1.0 ? 'Full' : 'High',
     timestamp: new Date().toISOString(),
     timestampLocal: new Date().toLocaleString(),
     timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -287,9 +405,16 @@ async function capturePhoto() {
       accuracy: state.position.coords.accuracy,
       altitude: state.position.coords.altitude,
       heading: state.position.coords.heading,
-      speed: state.position.coords.speed
+      speed: state.position.coords.speed,
+      dms: state.locationInfo?.dms || null
     } : null,
     address: document.getElementById('address').textContent,
+    locationDecipher: state.locationInfo ? {
+      hemisphere: state.locationInfo.hemisphere,
+      locationType: state.locationInfo.locationType,
+      seasonHint: state.locationInfo.seasonHint,
+      mapUrl: state.locationInfo.mapUrl
+    } : null,
     device: getDeviceInfo(),
     settings: { ...state.settings },
     projectName: state.settings.projectName,
@@ -306,11 +431,14 @@ async function capturePhoto() {
   // Update UI
   updatePhotoCount();
   
+  // Show resolution in toast
+  const resInfo = `${canvas.width}×${canvas.height}`;
+  
   // Auto-save to device if enabled
   if (state.settings.autoSave) {
     saveToDevice(photo);
   } else {
-    showToast('Photo captured! 📸', 'success');
+    showToast(`Photo captured! 📸 (${resInfo})`, 'success');
   }
   
   // Vibrate if available
@@ -365,13 +493,34 @@ function addMetadataOverlay(ctx, width, height) {
     );
   }
   
-  // Watermark
+  // Watermark - BIG and PROMINENT
   if (state.settings.watermarkEnabled) {
-    ctx.font = `bold ${fontSize * 0.9}px sans-serif`;
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-    ctx.textAlign = 'right';
-    ctx.fillText('TraceCam 📍', width - padding, height - padding);
+    const watermarkFontSize = fontSize * 2.5;
+    const watermarkPadding = padding * 1.5;
+    
+    // Draw watermark background bar at top
+    const watermarkBarHeight = watermarkFontSize * 1.8;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.fillRect(0, 0, width, watermarkBarHeight);
+    
+    // Draw main watermark text
+    ctx.font = `bold ${watermarkFontSize}px sans-serif`;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('📍 TraceCam', width / 2, watermarkBarHeight / 2);
+    
+    // Add subtle line under watermark
+    ctx.strokeStyle = 'rgba(16, 185, 129, 0.8)';
+    ctx.lineWidth = 3 * scale;
+    ctx.beginPath();
+    ctx.moveTo(width * 0.3, watermarkBarHeight - 5);
+    ctx.lineTo(width * 0.7, watermarkBarHeight - 5);
+    ctx.stroke();
+    
+    // Reset text settings
     ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
   }
 }
 
@@ -504,6 +653,8 @@ function saveSettings() {
     coordsOnImage: document.getElementById('coordsOnImage').checked,
     timestampOnImage: document.getElementById('timestampOnImage').checked,
     autoSave: document.getElementById('autoSave').checked,
+    fullResolution: document.getElementById('fullResolution')?.checked ?? true,
+    showLocationDecipher: document.getElementById('showLocationDecipher')?.checked ?? true,
     projectName: document.getElementById('projectName').value.trim(),
     operatorName: document.getElementById('operatorName').value.trim()
   };
@@ -525,6 +676,10 @@ function loadSettings() {
     document.getElementById('coordsOnImage').checked = state.settings.coordsOnImage;
     document.getElementById('timestampOnImage').checked = state.settings.timestampOnImage;
     document.getElementById('autoSave').checked = state.settings.autoSave ?? true;
+    const fullResEl = document.getElementById('fullResolution');
+    if (fullResEl) fullResEl.checked = state.settings.fullResolution ?? true;
+    const locDecEl = document.getElementById('showLocationDecipher');
+    if (locDecEl) locDecEl.checked = state.settings.showLocationDecipher ?? true;
     document.getElementById('projectName').value = state.settings.projectName || '';
     document.getElementById('operatorName').value = state.settings.operatorName || '';
   } catch (error) {
@@ -685,17 +840,56 @@ function previewPhoto(photoId) {
   state.currentPreview = photo;
   
   document.getElementById('previewImage').src = photo.imageData;
-  document.getElementById('previewMetadata').innerHTML = `
+  
+  let metadataHtml = `
     <p class="flex justify-between"><span class="text-slate-500">ID:</span><span class="text-white">${photo.id}</span></p>
-    <p class="flex justify-between"><span class="text-slate-500">Time:</span><span class="text-white">${photo.timestampLocal}</span></p>
+    <p class="flex justify-between"><span class="text-slate-500">Resolution:</span><span class="text-white">${photo.imageWidth || '?'}×${photo.imageHeight || '?'}</span></p>
+    ${photo.fileSizeKB ? `<p class="flex justify-between"><span class="text-slate-500">Size:</span><span class="text-white">${photo.fileSizeKB > 1024 ? (photo.fileSizeKB/1024).toFixed(1) + ' MB' : photo.fileSizeKB + ' KB'}</span></p>` : ''}
+    <p class="flex justify-between"><span class="text-slate-500">Quality:</span><span class="text-white">${photo.quality || 'High'}</span></p>
+    <div class="border-t border-slate-700 my-2 pt-2"></div>
+    <p class="flex justify-between"><span class="text-slate-500">Time:</span><span class="text-white text-right ml-2">${photo.timestampLocal}</span></p>
     <p class="flex justify-between"><span class="text-slate-500">Timezone:</span><span class="text-white">${photo.timezone}</span></p>
-    ${photo.location ? `<p class="flex justify-between"><span class="text-slate-500">Location:</span><span class="text-emerald-400">${photo.location.latitude.toFixed(6)}, ${photo.location.longitude.toFixed(6)}</span></p>` : ''}
-    ${photo.location?.accuracy ? `<p class="flex justify-between"><span class="text-slate-500">Accuracy:</span><span class="text-white">±${photo.location.accuracy.toFixed(1)}m</span></p>` : ''}
-    ${photo.address ? `<p class="flex justify-between"><span class="text-slate-500">Address:</span><span class="text-white text-right ml-2 truncate">${photo.address}</span></p>` : ''}
+  `;
+  
+  if (photo.location) {
+    metadataHtml += `
+      <div class="border-t border-slate-700 my-2 pt-2"></div>
+      <p class="flex justify-between"><span class="text-slate-500">Location:</span><span class="text-emerald-400">${photo.location.latitude.toFixed(6)}, ${photo.location.longitude.toFixed(6)}</span></p>
+    `;
+    
+    if (photo.location.dms) {
+      metadataHtml += `
+        <p class="text-xs text-slate-500 mt-1">DMS: ${photo.location.dms.latitude.formatted}, ${photo.location.dms.longitude.formatted}</p>
+      `;
+    }
+    
+    if (photo.location.accuracy) {
+      metadataHtml += `<p class="flex justify-between"><span class="text-slate-500">Accuracy:</span><span class="text-white">±${photo.location.accuracy.toFixed(1)}m</span></p>`;
+    }
+    
+    if (photo.locationDecipher) {
+      metadataHtml += `
+        <div class="bg-slate-800/50 rounded-lg p-2 mt-2">
+          <p class="text-xs text-slate-400">${photo.locationDecipher.hemisphere.lat}ern hemisphere • ${photo.locationDecipher.locationType}</p>
+          <p class="text-xs text-slate-500">${photo.locationDecipher.seasonHint}</p>
+          <a href="${photo.locationDecipher.mapUrl}" target="_blank" class="text-xs text-blue-400 hover:text-blue-300 mt-1 inline-block">🗺️ View on Map</a>
+        </div>
+      `;
+    }
+  }
+  
+  if (photo.address) {
+    metadataHtml += `<p class="flex justify-between mt-1"><span class="text-slate-500">Address:</span><span class="text-white text-right ml-2 text-xs">${photo.address}</span></p>`;
+  }
+  
+  metadataHtml += `
+    <div class="border-t border-slate-700 my-2 pt-2"></div>
     <p class="flex justify-between"><span class="text-slate-500">Session:</span><span class="text-white">${photo.sessionId}</span></p>
     ${photo.projectName ? `<p class="flex justify-between"><span class="text-slate-500">Project:</span><span class="text-white">${photo.projectName}</span></p>` : ''}
     ${photo.operatorName ? `<p class="flex justify-between"><span class="text-slate-500">Operator:</span><span class="text-white">${photo.operatorName}</span></p>` : ''}
   `;
+  
+  document.getElementById('previewMetadata').innerHTML = metadataHtml;
   
   document.getElementById('previewModal').classList.remove('hidden');
 }
